@@ -1,0 +1,28 @@
+{
+  "$schema": "https://dl.viam.dev/module.schema.json",
+  "module_id": "datiom:viam-firebase-push",
+  "visibility": "public",
+  "url": "https://github.com/Datiom/viam-firebase-push",
+  "description": "Modular generic service for sending Firebase push notifications",
+  "models": [
+    {
+      "api": "rdk:service:generic",
+      "model": "datiom:service:firebase-push",
+      "short_description": "Send push notifications via Firebase Cloud Messaging",
+      "markdown_link": "README.md#configuration"
+    }
+  ],
+  "applications": null,
+  "markdown_link": "README.md",
+  "entrypoint": "./run.sh",
+  "first_run": "",
+  "build": {
+    "build": "./build.sh",
+    "setup": "./setup.sh",
+    "path": "dist/archive.tar.gz",
+    "arch": [
+      "linux/amd64",
+      "linux/arm64"
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "module_name": "viam-firebase-push",
+  "namespace": "datiom",
+  "language": "python",
+  "resource_type": "service",
+  "resource_subtype": "generic",
+  "model_name": "firebase-push",
+  "enable_cloud_build": false,
+  "initialize_git": false,
+  "generator_version": "0.1.0",
+  "generated_on": "2025-05-15T17:57:03.211327Z",
+  "module_readme_link": "README.md"
+}
