@@ -298,9 +298,9 @@ class FirebasePush(Generic, EasyResource):
                     )
                     message_args["apns"] = messaging.APNSConfig(
                         payload=messaging.APNSPayload(
-                            aps=messaging.Aps(mutable_content=True),
-                            fcm_options=messaging.APNSFCMOptions(image=processed_image_url)
-                        )
+                            aps=messaging.Aps(mutable_content=True)
+                        ),
+                        fcm_options=messaging.APNSFCMOptions(image=processed_image_url)
                     )
                     message_args["webpush"] = messaging.WebpushConfig(
                         notification=messaging.WebpushNotification(image=processed_image_url)
