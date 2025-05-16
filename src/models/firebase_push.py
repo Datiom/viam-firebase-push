@@ -1,5 +1,9 @@
 import json
 from typing import ClassVar, Final, Mapping, Optional, Sequence, Dict, Any, List
+import base64
+import uuid
+import io
+from datetime import datetime, timedelta
 
 from typing_extensions import Self
 from viam.proto.app.robot import ComponentConfig
@@ -13,7 +17,7 @@ from viam.logging import getLogger
 
 try:
     import firebase_admin
-    from firebase_admin import credentials, messaging
+    from firebase_admin import credentials, messaging, storage
 except ImportError:
     raise ImportError("firebase_admin package is required. Install with 'pip install firebase-admin'")
 
@@ -25,6 +29,7 @@ class FirebasePush(Generic, EasyResource):
 
     # Attributes
     firebase_app = None
+    storage_bucket = None
     fcm_tokens: List[str] = []
     preset_messages: Dict[str, Dict[str, Any]] = {}
     enforce_preset: bool = False
@@ -58,6 +63,7 @@ class FirebasePush(Generic, EasyResource):
             # Clean up existing app
             firebase_admin.delete_app(self.firebase_app)
             self.firebase_app = None
+            self.storage_bucket = None
             
         # Get credentials
         cred = None
@@ -79,7 +85,19 @@ class FirebasePush(Generic, EasyResource):
             raise Exception("Either service_account_json or service_account_file must be provided")
             
         # Initialize Firebase app
-        self.firebase_app = firebase_admin.initialize_app(cred)
+        app_options = {}
+        storage_bucket_name = attributes.get("storage_bucket_name")
+        if storage_bucket_name:
+            app_options['storageBucket'] = storage_bucket_name
+            
+        self.firebase_app = firebase_admin.initialize_app(cred, options=app_options)
+        # Get a reference to the default storage bucket
+        try:
+            self.storage_bucket = storage.bucket(app=self.firebase_app)
+            self.logger.info(f"Successfully connected to Firebase Storage bucket: {self.storage_bucket.name}")
+        except Exception as e:
+            self.logger.error(f"Failed to connect to Firebase Storage bucket: {e}. Image upload via media_base64 will not work.")
+            self.storage_bucket = None
         
         # Get FCM tokens (now optional)
         self.fcm_tokens = []
@@ -150,6 +168,12 @@ class FirebasePush(Generic, EasyResource):
         preset_name = command.get("preset")
         template_vars = command.get("template_vars", {})
         
+        image_url_from_command = command.get("image_url")
+        media_base64 = command.get("media_base64")
+        media_mime_type = command.get("media_mime_type")
+        
+        processed_image_url = None
+
         # If preset is specified, use it
         if preset_name:
             if preset_name not in self.preset_messages:
@@ -158,6 +182,7 @@ class FirebasePush(Generic, EasyResource):
             preset = self.preset_messages[preset_name]
             title = preset.get("title", "")
             body = preset.get("body", "")
+            preset_image_url = preset.get("image_url")
             
             # Apply template variables
             if template_vars:
@@ -165,11 +190,47 @@ class FirebasePush(Generic, EasyResource):
                     placeholder = f"<<{key}>>"
                     title = title.replace(placeholder, str(value))
                     body = body.replace(placeholder, str(value))
+                    if preset_image_url:
+                        preset_image_url = preset_image_url.replace(placeholder, str(value))
+            
+            if preset_image_url:
+                processed_image_url = preset_image_url
+
         else:
             # Use direct parameters
             title = command.get("title", "")
             body = command.get("body", "")
-            
+            if image_url_from_command:
+                 processed_image_url = image_url_from_command
+
+        # Handle base64 image upload if provided, this overrides any other image_url
+        blob_to_delete = None
+        if media_base64 and media_mime_type:
+            if not self.storage_bucket:
+                self.logger.warning("media_base64 provided, but storage bucket is not configured/initialized. Cannot upload image.")
+            else:
+                try:
+                    image_bytes = base64.b64decode(media_base64)
+                    filename = f"push_image_{uuid.uuid4()}"
+                    
+                    blob = self.storage_bucket.blob(filename)
+                    
+                    # Use io.BytesIO for upload_from_file which is more general
+                    image_stream = io.BytesIO(image_bytes)
+                    blob.upload_from_file(image_stream, content_type=media_mime_type)
+                    image_stream.close()
+                    
+                    # Generate signed URL (e.g., valid for 15 minutes)
+                    processed_image_url = blob.generate_signed_url(
+                        expiration=timedelta(minutes=15),
+                        method='GET'
+                    )
+                    blob_to_delete = blob
+                    self.logger.info(f"Uploaded base64 image to {filename}, signed URL: {processed_image_url}")
+                except Exception as e:
+                    self.logger.error(f"Error processing media_base64: {e}. Proceeding without image from base64.")
+                    # Keep previously set processed_image_url (from command or preset) if base64 fails
+
         # Get data payload
         data = command.get("data", {})
         
@@ -213,14 +274,50 @@ class FirebasePush(Generic, EasyResource):
         
         for token in target_tokens:
             try:
-                message = messaging.Message(
-                    notification=messaging.Notification(
-                        title=title,
-                        body=body,
-                    ),
-                    data=data,
-                    token=token,
-                )
+                # Construct the basic message
+                message_args = {
+                    "data": data,
+                    "token": token,
+                }
+
+                # Add notification part if title or body is present
+                if title or body:
+                     message_args["notification"] = messaging.Notification(title=title, body=body)
+
+                # Add image if processed_image_url is available
+                if processed_image_url:
+                    if "notification" not in message_args or message_args["notification"] is None:
+                         # if only image is sent, we need a notification object
+                         message_args["notification"] = messaging.Notification(image=processed_image_url)
+                    else:
+                        message_args["notification"].image = processed_image_url
+
+                    # Platform-specific configurations for image display
+                    message_args["android"] = messaging.AndroidConfig(
+                        notification=messaging.AndroidNotification(image=processed_image_url)
+                    )
+                    message_args["apns"] = messaging.APNSConfig(
+                        payload=messaging.APNSPayload(
+                            aps=messaging.Aps(mutable_content=True),
+                            fcm_options=messaging.APNSFCMOptions(image=processed_image_url)
+                        )
+                    )
+                    message_args["webpush"] = messaging.WebpushConfig(
+                        notification=messaging.WebpushNotification(image=processed_image_url)
+                    )
+
+                # Ensure there's at least a notification or data part
+                if "notification" not in message_args and not data:
+                    # This case should ideally be caught earlier (e.g. title/body/data required)
+                    # but as a safeguard for message structure:
+                    if processed_image_url: # If only image was given, it's in notification now
+                         pass # Notification object was created for the image
+                    else:
+                        self.logger.warning(f"Skipping token {token} as there is no title, body, data, or image to send.")
+                        failed_tokens.append(token)
+                        continue
+
+                message = messaging.Message(**message_args)
                 
                 response = messaging.send(message, app=self.firebase_app)
                 successful_count += 1
@@ -235,6 +332,14 @@ class FirebasePush(Generic, EasyResource):
             "failed_count": len(failed_tokens),
             "sent_to_tokens": successful_count
         }
+        
+        # Delete uploaded image from storage if it exists
+        if blob_to_delete:
+            try:
+                blob_to_delete.delete()
+                self.logger.info(f"Successfully deleted temporary image {blob_to_delete.name} from Firebase Storage.")
+            except Exception as e:
+                self.logger.error(f"Failed to delete temporary image {blob_to_delete.name} from Firebase Storage: {e}")
         
         return result
 
