@@ -201,7 +201,7 @@ class FirebasePush(Generic, EasyResource):
             title = command.get("title", "")
             body = command.get("body", "")
             if image_url_from_command:
-                 processed_image_url = image_url_from_command
+                processed_image_url = image_url_from_command
 
         # Handle base64 image upload if provided, this overrides any other image_url
         blob_to_delete = None
@@ -233,6 +233,8 @@ class FirebasePush(Generic, EasyResource):
 
         # Get data payload
         data = command.get("data", {})
+        if not isinstance(data, dict):
+            data = {}
         
         # Validate required fields
         if not title and not body:

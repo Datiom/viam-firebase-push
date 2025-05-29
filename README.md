@@ -182,6 +182,21 @@ Sending a notification with an image provided via a URL:
 }
 ```
 
+Sending a notification with a data payload:
+
+```json
+{
+  "command": "send",
+  "title": "Motion Detected",
+  "body": "Motion detected on Camera 1",
+  "data": {
+    "type": "camera_event",
+    "cameraName": "discovery---display"
+  },
+  "fcm_tokens": ["YOUR_FCM_TOKEN"]
+}
+```
+
 ##### Response
 
 ```json
