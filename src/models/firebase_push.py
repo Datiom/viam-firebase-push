@@ -58,6 +58,11 @@ class FirebasePush(Generic, EasyResource):
     ):
         attributes = struct_to_dict(config.attributes)
         
+        # right now re-initializing the tokens every restart to clear any issue
+        # If firebase complains we will want to persist them in a database
+        self.soft_failed_tokens = {} 
+        self.hard_failed_tokens = {} 
+        self.success_tokens = {} 
         # Initialize Firebase app with credentials
         if self.firebase_app:
             # Clean up existing app
@@ -155,9 +160,20 @@ class FirebasePush(Generic, EasyResource):
         
         if cmd == "send":
             return await self._handle_send(command)
+        elif cmd == "get_failed_tokens":
+            return await self._handle_get_failed_tokens()
         else:
             raise Exception(f"Unknown command: {cmd}")
             
+    async def _handle_get_failed_tokens(self) -> Mapping[str, ValueTypes]:
+        """Handle the get_failed_tokens command to get the failed tokens"""
+        result = {
+            "hard_failed_tokens": self.hard_failed_tokens,
+            "soft_failed_tokens": self.soft_failed_tokens,
+            "success_tokens": self.success_tokens
+        }
+        return result
+    
     async def _handle_send(self, command: Mapping[str, ValueTypes]) -> Mapping[str, ValueTypes]:
         """Handle the send command to send push notifications"""
         # Check if we need to use presets
@@ -270,71 +286,115 @@ class FirebasePush(Generic, EasyResource):
         if not target_tokens:
             raise Exception("No FCM tokens provided. Either configure tokens or provide them in the command.")
             
-        # Send notification to all target tokens
-        failed_tokens = []
-        successful_count = 0
-        
-        for token in target_tokens:
-            try:
-                # Construct the basic message
-                message_args = {
-                    "data": data,
-                    "token": token,
-                }
 
-                # Add notification part if title or body is present
-                if title or body:
-                     message_args["notification"] = messaging.Notification(title=title, body=body)
+        # Remove tokens that have failed too many times 
+        dirty_tokens = [token for token in target_tokens 
+                 if self.hard_failed_tokens.get(token, 0) >= 3]
+        clean_tokens = [token for token in target_tokens 
+                 if token not in dirty_tokens ]
 
-                # Add image if processed_image_url is available
-                if processed_image_url:
-                    if "notification" not in message_args or message_args["notification"] is None:
-                         # if only image is sent, we need a notification object
-                         message_args["notification"] = messaging.Notification(image=processed_image_url)
-                    else:
-                        message_args["notification"].image = processed_image_url
-
-                    # Platform-specific configurations for image display
-                    message_args["android"] = messaging.AndroidConfig(
-                        notification=messaging.AndroidNotification(image=processed_image_url)
-                    )
-                    message_args["apns"] = messaging.APNSConfig(
-                        payload=messaging.APNSPayload(
-                            aps=messaging.Aps(mutable_content=True)
-                        ),
-                        fcm_options=messaging.APNSFCMOptions(image=processed_image_url)
-                    )
-                    message_args["webpush"] = messaging.WebpushConfig(
-                        notification=messaging.WebpushNotification(image=processed_image_url)
-                    )
-
-                # Ensure there's at least a notification or data part
-                if "notification" not in message_args and not data:
-                    # This case should ideally be caught earlier (e.g. title/body/data required)
-                    # but as a safeguard for message structure:
-                    if processed_image_url: # If only image was given, it's in notification now
-                         pass # Notification object was created for the image
-                    else:
-                        self.logger.warning(f"Skipping token {token} as there is no title, body, data, or image to send.")
-                        failed_tokens.append(token)
-                        continue
-
-                message = messaging.Message(**message_args)
-                
-                response = messaging.send(message, app=self.firebase_app)
-                successful_count += 1
-                self.logger.debug(f"Successfully sent message: {response}")
-            except Exception as e:
-                self.logger.error(f"Error sending notification to token {token}: {e}")
-                failed_tokens.append(token)
-                
-        result = {
-            "success": successful_count > 0,
-            "sent_count": successful_count,
-            "failed_count": len(failed_tokens),
-            "sent_to_tokens": successful_count
+        # sending tokens in multicast
+        message_args= {
+            "data": data,
         }
-        
+
+        try:
+            # Add notification part if title or body is present
+            if title or body:
+                    message_args["notification"] = messaging.Notification(title=title, body=body)
+
+            # Add image if processed_image_url is available
+            if processed_image_url:
+                if "notification" not in message_args or message_args["notification"] is None:
+                        # if only image is sent, we need a notification object
+                        message_args["notification"] = messaging.Notification(image=processed_image_url)
+                else:
+                    message_args["notification"].image = processed_image_url
+
+                # Platform-specific configurations for image display
+                message_args["android"] = messaging.AndroidConfig(
+                    notification=messaging.AndroidNotification(image=processed_image_url)
+                )
+                message_args["apns"] = messaging.APNSConfig(
+                    payload=messaging.APNSPayload(
+                        aps=messaging.Aps(mutable_content=True)
+                    ),
+                    fcm_options=messaging.APNSFCMOptions(image=processed_image_url)
+                )
+                message_args["webpush"] = messaging.WebpushConfig(
+                    notification=messaging.WebpushNotification(image=processed_image_url)
+                )
+
+            # Ensure there's at least a notification or data part
+            if "notification" not in message_args and not data:
+                # This case should ideally be caught earlier (e.g. title/body/data required)
+                # but as a safeguard for message structure:
+                if processed_image_url: # If only image was given, it's in notification now
+                    pass # Notification object was created for the image
+                else:
+                    self.logger.warning(f"Cannot send message to {target_tokens} as there is no title, body, data, or image to send.")
+                    raise InvalidInputError(f"there is no title, body, data, or image to send.")
+
+
+            self.logger.info(f"sending message to {target_tokens} in multicast")
+            # start with a batch size of 5 and increase it to 100 after checking validity in production.
+            # we could put this in the config, though it seems a bit low level to do so.
+            BATCH_SIZE = 5
+            total_success = 0
+            total_failure = 0
+
+            for i in range(0, len(clean_tokens), BATCH_SIZE):
+                batch_tokens = clean_tokens[i:i+BATCH_SIZE]
+                message_args["tokens"] = batch_tokens
+                multicast_message = messaging.MulticastMessage(**message_args)            
+                response = messaging.send_each_for_multicast(multicast_message, app=self.firebase_app)
+                total_success += response.success_count
+                total_failure += response.failure_count
+
+                for j, result in enumerate(response.responses):
+                    token = batch_tokens[j]
+                    if result.success:
+                        self.success_tokens[token] = self.success_tokens.get(token, 0) + 1
+                        self.logger.debug(f"Successfully sent message: {result.message_id} to token {token}")
+                        #remove that token from the failed token list
+                        if token in self.soft_failed_tokens:
+                            del self.soft_failed_tokens[token]
+                        if token in self.hard_failed_tokens:
+                            del self.hard_failed_tokens[token]
+                    else:
+                        # These indicate invalid tokens you should stop sending to:
+                        if result.exception.code in ['registration-token-not-registered', 
+                                                'invalid-registration-token']:
+                            self.logger.info(f"Token {token} hard failed and should not be sent to again")
+                            self.hard_failed_tokens[token] = self.hard_failed_tokens.get(token, 0) + 1
+                        else:
+                            error_code = getattr(result.exception, 'code', 'unknown_error')
+                            error_message = getattr(result.exception, 'message', 'no_message')
+                            self.logger.error(f"Token {token} failed: {error_code} - {error_message}")
+                            self.soft_failed_tokens[token] = self.soft_failed_tokens.get(token, 0) + 1
+                        
+            result = {
+                        "success": total_success > 0,
+                        "sent_count": total_success,
+                        "failed_count": total_failure + len(dirty_tokens),
+                        "sent_to_tokens": total_success
+            }
+                
+
+
+        except Exception as e:
+            self.logger.error(f"Error sending notification {e}")
+            result = {
+                            "success": False,
+                            "sent_count": 0,
+                            "failed_count":len(target_tokens),
+                            "sent_to_tokens": 0
+                }
+                
+
+            
+            
+
         # Delete uploaded image from storage if it exists
         if blob_to_delete:
             try:
