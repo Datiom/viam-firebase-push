@@ -30,9 +30,18 @@ class FirebasePush(Generic, EasyResource):
     # Attributes
     firebase_app = None
     storage_bucket = None
-    fcm_tokens: List[str] = []
-    preset_messages: Dict[str, Dict[str, Any]] = {}
-    enforce_preset: bool = False
+    # class constants for default values of optional attributes
+    FCM_TOKENS: List[str] = []
+    PRESET_MESSAGES: Dict[str, Dict[str, Any]] = {}
+    ENFORCE_PRESET: bool = False
+    BATCH_SIZE: int = 5
+
+    # first implementation, do not persist the list of bad tokens in DB. We'll provide an easy command to clear them
+    # until we know how to handle them better. 
+    # We will log the cache via data manager.
+    SOFT_FAILED_TOKENS = {} 
+    HARD_FAILED_TOKENS = {} 
+    SUCCESS_TOKENS = {} 
     
     @classmethod
     def new(
@@ -58,11 +67,6 @@ class FirebasePush(Generic, EasyResource):
     ):
         attributes = struct_to_dict(config.attributes)
         
-        # right now re-initializing the tokens every restart to clear any issue
-        # If firebase complains we will want to persist them in a database
-        self.soft_failed_tokens = {} 
-        self.hard_failed_tokens = {} 
-        self.success_tokens = {} 
         # Initialize Firebase app with credentials
         if self.firebase_app:
             # Clean up existing app
@@ -105,7 +109,7 @@ class FirebasePush(Generic, EasyResource):
             self.storage_bucket = None
         
         # Get FCM tokens (now optional)
-        self.fcm_tokens = []
+        self.fcm_tokens = FirebasePush.FCM_TOKENS
         fcm_tokens_value = attributes.get("fcm_tokens")
         if fcm_tokens_value:
             if isinstance(fcm_tokens_value, str):
@@ -122,6 +126,13 @@ class FirebasePush(Generic, EasyResource):
                 else:
                     self.fcm_tokens = fcm_tokens_value
         
+
+        batch_size_value = attributes.get("batch_size")
+        if batch_size_value:
+            self.batch_size = int(batch_size_value)
+        else: 
+            self.batch_size = FirebasePush.BATCH_SIZE
+
         # Get preset messages
         preset_messages_value = attributes.get("preset_messages")
         if preset_messages_value:
@@ -129,13 +140,16 @@ class FirebasePush(Generic, EasyResource):
                 self.preset_messages = json.loads(preset_messages_value)
             else:
                 self.preset_messages = preset_messages_value
-        else:
-            self.preset_messages = {}
+        else:    
+            self.preset_messages = FirebasePush.PRESET_MESSAGES
             
         # Check if we should enforce using preset messages
-        enforce_preset_value = attributes.get("enforce_preset", False)
-        self.enforce_preset = bool(enforce_preset_value)
-            
+        enforce_preset_value = attributes.get("enforce_preset")
+        if enforce_preset_value is not None:  # Check for None instead of truthiness
+            self.enforce_preset = bool(enforce_preset_value)
+        else:
+            self.enforce_preset = FirebasePush.ENFORCE_PRESET
+                
         # Log successful configuration
         if self.fcm_tokens:
             self.logger.info(f"Firebase Push configured with {len(self.fcm_tokens)} default FCM tokens")
@@ -144,6 +158,8 @@ class FirebasePush(Generic, EasyResource):
             
         if self.preset_messages:
             self.logger.info(f"Configured with {len(self.preset_messages)} preset messages")
+
+
 
     async def do_command(
         self,
@@ -162,15 +178,24 @@ class FirebasePush(Generic, EasyResource):
             return await self._handle_send(command)
         elif cmd == "get_failed_tokens":
             return await self._handle_get_failed_tokens()
+        elif cmd == "clear_cache":
+            return await self._clear_cache()
         else:
             raise Exception(f"Unknown command: {cmd}")
             
+    async def _clear_cache(self) -> Mapping[str, ValueTypes]:
+        """Handle the clear_cache command to clear the cache"""
+        FirebasePush.HARD_FAILED_TOKENS = {}
+        FirebasePush.SOFT_FAILED_TOKENS = {}
+        FirebasePush.SUCCESS_TOKENS = {}
+        return {"success": True}
+
     async def _handle_get_failed_tokens(self) -> Mapping[str, ValueTypes]:
         """Handle the get_failed_tokens command to get the failed tokens"""
         result = {
-            "hard_failed_tokens": self.hard_failed_tokens,
-            "soft_failed_tokens": self.soft_failed_tokens,
-            "success_tokens": self.success_tokens
+            "hard_failed_tokens": FirebasePush.HARD_FAILED_TOKENS,
+            "soft_failed_tokens": FirebasePush.SOFT_FAILED_TOKENS,
+            "success_tokens": FirebasePush.SUCCESS_TOKENS
         }
         return result
     
@@ -289,9 +314,12 @@ class FirebasePush(Generic, EasyResource):
 
         # Remove tokens that have failed too many times 
         dirty_tokens = [token for token in target_tokens 
-                 if self.hard_failed_tokens.get(token, 0) >= 3]
+                 if FirebasePush.HARD_FAILED_TOKENS.get(token, 0) >= 1 
+                   or  FirebasePush.SOFT_FAILED_TOKENS.get(token, 0) >= 3]
         clean_tokens = [token for token in target_tokens 
                  if token not in dirty_tokens ]
+
+        self.logger.debug(f"removed {len(dirty_tokens)} tokens that have failed too many times from {len(target_tokens)} tokens, sending {len(clean_tokens)} tokens remaining")
 
         # sending tokens in multicast
         message_args= {
@@ -337,58 +365,61 @@ class FirebasePush(Generic, EasyResource):
 
 
             self.logger.info(f"sending message to {target_tokens} in multicast")
-            # start with a batch size of 5 and increase it to 100 after checking validity in production.
-            # we could put this in the config, though it seems a bit low level to do so.
-            BATCH_SIZE = 5
             total_success = 0
             total_failure = 0
+            batch_number = 0
 
-            for i in range(0, len(clean_tokens), BATCH_SIZE):
-                batch_tokens = clean_tokens[i:i+BATCH_SIZE]
+            for i in range(0, len(clean_tokens), self.batch_size):
+                batch_tokens = clean_tokens[i:i+self.batch_size]
+                self.logger.debug(f"sending batch {batch_number} with {len(batch_tokens)} tokens (indices {i} to {i+len(batch_tokens)-1})")
                 message_args["tokens"] = batch_tokens
                 multicast_message = messaging.MulticastMessage(**message_args)            
                 response = messaging.send_each_for_multicast(multicast_message, app=self.firebase_app)
                 total_success += response.success_count
                 total_failure += response.failure_count
+                batch_number += 1
 
                 for j, result in enumerate(response.responses):
                     token = batch_tokens[j]
                     if result.success:
-                        self.success_tokens[token] = self.success_tokens.get(token, 0) + 1
+                        FirebasePush.SUCCESS_TOKENS[token] = FirebasePush.SUCCESS_TOKENS.get(token, 0) + 1
                         self.logger.debug(f"Successfully sent message: {result.message_id} to token {token}")
                         #remove that token from the failed token list
-                        if token in self.soft_failed_tokens:
-                            del self.soft_failed_tokens[token]
-                        if token in self.hard_failed_tokens:
-                            del self.hard_failed_tokens[token]
+                        if token in FirebasePush.SOFT_FAILED_TOKENS:
+                            del FirebasePush.SOFT_FAILED_TOKENS[token]
+                        if token in FirebasePush.HARD_FAILED_TOKENS:
+                            del FirebasePush.HARD_FAILED_TOKENS[token]
                     else:
+                        error_code = getattr(result.exception, 'code', 'unknown_error')
                         # These indicate invalid tokens you should stop sending to:
-                        if result.exception.code in ['registration-token-not-registered', 
-                                                'invalid-registration-token']:
-                            self.logger.info(f"Token {token} hard failed and should not be sent to again")
-                            self.hard_failed_tokens[token] = self.hard_failed_tokens.get(token, 0) + 1
+                        if error_code.lower() in ['registration-token-not-registered', 
+                                          'invalid-registration-token',
+                                          'invalid-argument']:
+                            self.logger.info(f"Token {token} hard failed with  code: {error_code} and message {error_message}")
+                            FirebasePush.HARD_FAILED_TOKENS[token] = FirebasePush.HARD_FAILED_TOKENS.get(token, 0) + 1
                         else:
-                            error_code = getattr(result.exception, 'code', 'unknown_error')
                             error_message = getattr(result.exception, 'message', 'no_message')
-                            self.logger.error(f"Token {token} failed: {error_code} - {error_message}")
-                            self.soft_failed_tokens[token] = self.soft_failed_tokens.get(token, 0) + 1
+                            self.logger.info(f"Token {token} soft failed with code {error_code} and message {error_message}")
+                            FirebasePush.SOFT_FAILED_TOKENS[token] = FirebasePush.SOFT_FAILED_TOKENS.get(token, 0) + 1
                         
             result = {
-                        "success": total_success > 0,
-                        "sent_count": total_success,
+                        "success": total_failure + len(dirty_tokens) == 0,
+                        "request_count": len(target_tokens),
+                        "sent_count": len(clean_tokens),
                         "failed_count": total_failure + len(dirty_tokens),
-                        "sent_to_tokens": total_success
+                        "success_count": total_success
             }
                 
 
 
         except Exception as e:
-            self.logger.error(f"Error sending notification {e}")
+            self.logger.exception(f"Error sending notification {e}")
             result = {
-                            "success": False,
-                            "sent_count": 0,
-                            "failed_count":len(target_tokens),
-                            "sent_to_tokens": 0
+                        "success": False,
+                        "request_count": len(target_tokens),
+                        "sent_count": 0,
+                        "failed_count":len(target_tokens),
+                        "success_count": 0
                 }
                 
 

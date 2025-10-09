@@ -25,7 +25,8 @@ The following attribute template can be used to configure this model:
       "title": "Notification Title",
       "body": "Notification Body",
       "image_url": "https://example.com/image.png"
-    }
+    },
+    "batch_size": "<the number of tokens to send together to firebase>"
   },
   "enforce_preset": false
 }
@@ -198,6 +199,8 @@ Sending a notification with a data payload:
 ```
 
 ##### Response
+
+success will return true if all the tokens were sent to and false otherwise. sent_count is the number of tokens received, sent_to_tokens, the number that were confirmed to be reached and failed_count the ones that were not reached.
 
 ```json
 {
