@@ -1,7 +1,7 @@
 VENV   := venv
 PYTHON := $(VENV)/bin/python
 
-.PHONY: setup build module run update clean
+.PHONY: setup build module run update clean upload
 
 # setup.sh skips pip when .installed exists, so drop the marker whenever
 # requirements.txt changes to force a reinstall.
@@ -15,7 +15,13 @@ setup: .installed
 build: setup
 	sh ./build.sh
 
-module: build
+# viam-server unpacks the module.tar.gz and runs ./run.sh, which builds the venv on the device.
+MODULE_FILES := meta.json run.sh setup.sh requirements.txt src/main.py src/models/firebase_push.py
+
+module.tar.gz: $(MODULE_FILES)
+	tar -czf $@ $(MODULE_FILES)
+
+module: module.tar.gz
 
 run: setup
 	exec $(PYTHON) -m src.main $(ARGS)
@@ -27,4 +33,11 @@ update:
 	echo "viam-sdk pinned to $$latest"
 
 clean:
-	rm -rf $(VENV) .installed build dist main.spec
+	rm -rf $(VENV) .installed build dist main.spec module.tar.gz
+
+VERSION ?= 0.0.6
+
+# Build the bundle, then print the upload command. Override the version with
+#  `make upload VERSION=1.2.3`
+upload: module.tar.gz
+	@echo viam module upload --version \"$(VERSION)\" --platform \"any\" module.tar.gz
