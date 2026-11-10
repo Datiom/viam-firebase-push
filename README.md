@@ -41,8 +41,8 @@ The following attributes are available for this model:
 | `service_account_file` | string           | **Required if service_account_json not provided** | Path to Firebase service account credentials JSON file                                                                                                                               |
 | `storage_bucket_name`  | string           | Optional                | The name of your Firebase Storage bucket (e.g., `your-project-id.appspot.com`). If provided, this bucket will be used for temporary image uploads when `media_base64` is used. If not specified, the default bucket for the Firebase project will be attempted. Ensure the service account has **Storage Object Admin** or equivalent permissions on this bucket. |
 | `fcm_tokens`           | array or string  | Optional                | Default list of FCM tokens to send notifications to. Can be a single string or an array of strings. If not specified, tokens must be provided in the doCommand call.                        |
-| `preset_messages`      | object           | Optional                | An object with key (preset name) and value (object with `title`, `body`, and optional `image_url`) pairs that can be used to send pre-configured messages. Template strings can be embedded within double angle brackets, for example: `<<to_replace>>` |
-| `enforce_preset`       | boolean          | Optional, default false | If set to true, preset_messages must be configured and a preset message must be selected when sending a notification.                                                                       |
+| `preset_messages`      | object           | Optional                | An object with key (preset name) and value (object with `title`, `body`, and optional `image_url`) pairs that can be used to send pre-configured messages. All preset fields must be strings. Template strings can be embedded within double angle brackets, for example: `<<to_replace>>` |
+| `enforce_preset`       | boolean          | Optional, default false | If set to true, preset_messages must be configured and a preset message must be selected when sending a notification. Must be a JSON boolean, not a string.                                  |
 
 #### Example Configuration
 
@@ -110,12 +110,12 @@ Send a push notification to FCM tokens.
 
 | Name              | Type             | Inclusion                                | Description                                                         |
 |-------------------|------------------|------------------------------------------|---------------------------------------------------------------------|
-| `title`           | string           | **Required if preset not used and no image**          | The notification title                                              |
-| `body`            | string           | **Required if preset not used and no image**          | The notification body                                               |
-| `image_url`       | string           | Optional                                 | URL of an image to include in the notification. Overridden by `media_base64` if both are provided. Template variables can be used if part of a preset. |
-| `media_base64`    | string           | Optional                                 | Base64 encoded string of an image to send. If provided with `media_mime_type`, the image will be temporarily uploaded to Firebase Storage (and then deleted), and its signed URL will be used. Requires `storage_bucket_name` to be configured or default bucket to be accessible, and the service account to have write/delete permissions. |
+| `title`           | string           | **Required if preset and body not used** | The notification title. Ignored when `preset` is used.              |
+| `body`            | string           | **Required if preset and title not used** | The notification body. Ignored when `preset` is used.              |
+| `image_url`       | string           | Optional                                 | URL of an image to include in the notification. Overridden by `media_base64` if both are provided. Ignored when `preset` is used; set `image_url` in the preset instead, where template variables can be used. |
+| `media_base64`    | string           | Optional                                 | Base64 encoded string of an image to send. If provided with `media_mime_type`, the image is uploaded to Firebase Storage and its signed URL is used. The URL is valid for 15 minutes, and the image is deleted when it expires, or earlier if the service is reconfigured or stopped. Use standard base64 with no line breaks or whitespace. If the upload fails, the notification is still sent, using `image_url` if one was given. Requires `storage_bucket_name` to be configured or default bucket to be accessible, and the service account to have write/delete permissions. |
 | `media_mime_type` | string           | Optional                                 | MIME type of the base64 encoded image (e.g., `image/png`, `image/jpeg`). Required if `media_base64` is used. |
-| `data`            | object           | Optional                                 | Additional data to send with the notification                        |
+| `data`            | object           | Optional                                 | Additional data to send with the notification. All values must be strings; any other value type fails the command. |
 | `preset`          | string           | **Required if enforce_preset is true**   | The name of a preset message to use                                 |
 | `template_vars`   | object           | Optional                                 | Variables to replace in preset message templates (applies to title, body, and image_url in presets) |
 | `fcm_tokens`      | array or string  | **Required if not configured**           | FCM tokens to send the notification to. Overrides configured tokens if provided. Can be a single token string, a JSON string array, or a direct array. |
@@ -207,3 +207,34 @@ Sending a notification with a data payload:
   "sent_to_tokens": 2
 }
 ```
+
+`success` is true if at least one token received the notification. Tokens are sent in batches of 500. `sent_to_tokens` duplicates `sent_count` and is kept for older callers.
+
+### Status
+
+The service reports its status (for example, through `GetStatus`) as:
+
+```json
+{
+  "default_tokens": 2,
+  "presets": ["alert", "welcome"],
+  "enforce_preset": true,
+  "storage_bucket": "your-project-id.appspot.com",
+  "pending_images": 0
+}
+```
+
+`pending_images` is the number of uploaded `media_base64` images not yet deleted.
+
+## Development
+
+The module is written in Go. Common `make` targets:
+
+| Target             | Description                                                                     |
+|--------------------|---------------------------------------------------------------------------------|
+| `make build`       | Build `bin/firebase-push` for the host platform                                 |
+| `make test`        | Run the unit tests                                                              |
+| `make module.tar.gz` | Build and package the module for the current platform (used by cloud build)  |
+| `make packages`    | Cross-compile tarballs for every platform into `bin/<os>-<arch>/module.tar.gz`  |
+| `make upload VERSION=x.y.z` | Build all packages and print the `viam module upload` commands         |
+| `make update`      | Update the Viam RDK dependency to the latest release                            |

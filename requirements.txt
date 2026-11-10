@@ -1,5 +1,0 @@
-viam-sdk==0.85.1
-
-typing-extensions
-
-firebase-admin>=6.2.0

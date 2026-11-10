@@ -1,7 +1,7 @@
 {
   "module_name": "viam-firebase-push",
   "namespace": "viam",
-  "language": "python",
+  "language": "go",
   "resource_type": "service",
   "resource_subtype": "generic",
   "model_name": "firebase-push",
