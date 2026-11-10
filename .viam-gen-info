@@ -1,6 +1,6 @@
 {
   "module_name": "viam-firebase-push",
-  "namespace": "datiom",
+  "namespace": "viam",
   "language": "python",
   "resource_type": "service",
   "resource_subtype": "generic",

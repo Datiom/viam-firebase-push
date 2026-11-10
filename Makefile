@@ -35,7 +35,7 @@ update:
 clean:
 	rm -rf $(VENV) .installed build dist main.spec module.tar.gz
 
-VERSION ?= 0.0.6
+VERSION ?= 0.0.7
 
 # Build the bundle, then print the upload command. Override the version with
 #  `make upload VERSION=1.2.3`

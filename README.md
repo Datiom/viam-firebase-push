@@ -2,7 +2,7 @@
 
 A Viam module that provides a generic service to send push notifications via Firebase Cloud Messaging (FCM).
 
-## Model datiom:viam-firebase-push:firebase-push
+## Model viam:service:firebase-push
 
 This model allows you to send push notifications to mobile devices using Firebase Cloud Messaging. FCM tokens can be configured in the service attributes and/or passed dynamically via doCommand.
 
