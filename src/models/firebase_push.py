@@ -1,5 +1,5 @@
 import json
-from typing import ClassVar, Final, Mapping, Optional, Sequence, Dict, Any, List
+from typing import ClassVar, Final, Mapping, Optional, Sequence, Dict, Any, List, Tuple
 import base64
 import uuid
 import io
@@ -43,7 +43,7 @@ class FirebasePush(Generic, EasyResource):
         return service
 
     @classmethod
-    def validate_config(cls, config: ComponentConfig) -> Sequence[str]:
+    def validate_config(cls, config: ComponentConfig) -> Tuple[Sequence[str], Sequence[str]]:
         attributes = struct_to_dict(config.attributes)
         
         # Check that either service_account_json or service_account_file is provided
@@ -51,7 +51,7 @@ class FirebasePush(Generic, EasyResource):
             raise Exception("Either service_account_json or service_account_file must be provided")
             
         # FCM tokens are now optional as they can be passed via doCommand
-        return []
+        return [], []
 
     def reconfigure(
         self, config: ComponentConfig, dependencies: Mapping[ResourceName, ResourceBase]
