@@ -24,7 +24,7 @@ except ImportError:
 
 class FirebasePush(Generic, EasyResource):
     MODEL: ClassVar[Model] = Model(
-        ModelFamily("datiom", "service"), "firebase-push"
+        ModelFamily("viam", "service"), "firebase-push"
     )
 
     # Attributes
